@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Restauração do banco a partir do S3.
+# Uso: mongo-restore.sh <test|main> [arquivo|latest]
+#   test -> restaura em um contêiner temporário isolado (sem rede, sem tocar
+#           na demonstração), confere a contagem e remove o contêiner.
+#   main -> restaura sobre o banco principal (--drop). Faz um backup antes.
+set -euo pipefail
+
+MODE="${1:?informe test ou main}"
+FILE="${2:-latest}"
+LOCAL_DIR=/var/backups/mongo
+PREFIX="{{ backup_prefix }}"
+BUCKET="{{ backup_bucket }}"
+AWS="docker run --rm -v ${LOCAL_DIR}:/backup -e AWS_DEFAULT_REGION={{ aws_region }} {{ awscli_image }}"
+
+if [ "${FILE}" = "latest" ]; then
+  FILE="$($AWS s3 ls "s3://${BUCKET}/${PREFIX}/" | awk '{print $4}' | grep '\.archive\.gz$' | sort | tail -n 1)"
+  [ -n "${FILE}" ] || { echo "Nenhum backup encontrado em s3://${BUCKET}/${PREFIX}/"; exit 1; }
+fi
+
+echo "Backup selecionado: s3://${BUCKET}/${PREFIX}/${FILE}"
+$AWS s3 cp "s3://${BUCKET}/${PREFIX}/${FILE}" "/backup/${FILE}" --only-show-errors
+EXPECTED="$($AWS s3api head-object --bucket "${BUCKET}" --key "${PREFIX}/${FILE}" --query 'Metadata.todos' --output text)"
+echo "Tarefas registradas no backup: ${EXPECTED}"
+
+if [ "${MODE}" = "test" ]; then
+  NAME="mongo-restore-test"
+  docker rm -f "${NAME}" >/dev/null 2>&1 || true
+  # Ambiente isolado: sem rede, dados temporários, mesma versão do MongoDB
+  docker run -d --name "${NAME}" --network none --tmpfs /data/db mongo:{{ mongo_tag }} >/dev/null
+  trap 'docker rm -f "${NAME}" >/dev/null 2>&1 || true' EXIT
+  for _ in $(seq 1 30); do
+    docker exec "${NAME}" mongosh --quiet --eval "db.adminCommand('ping').ok" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  docker exec -i "${NAME}" mongorestore --quiet --archive --gzip < "${LOCAL_DIR}/${FILE}"
+  RESTORED="$(docker exec "${NAME}" mongosh --quiet --eval "db.getSiblingDB('{{ mongo_database }}').todos.countDocuments()")"
+  echo "Tarefas restauradas no ambiente isolado: ${RESTORED}"
+  docker exec "${NAME}" mongosh --quiet --eval "db.getSiblingDB('{{ mongo_database }}').todos.find({}, {_id:0}).forEach(d => printjson(d))"
+  if [ "${RESTORED}" = "${EXPECTED}" ]; then
+    echo "RESTAURACAO_OK: contagem confere (${RESTORED})"
+  else
+    echo "RESTAURACAO_FALHOU: esperado ${EXPECTED}, obtido ${RESTORED}"; exit 1
+  fi
+elif [ "${MODE}" = "main" ]; then
+  /usr/local/bin/mongo-backup.sh pre-restore
+  docker exec -i {{ mongo_container | default('mongo') }} sh -c \
+    'mongorestore --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+     --authenticationDatabase admin --drop --nsInclude "$MONGO_INITDB_DATABASE.*" --archive --gzip' \
+    < "${LOCAL_DIR}/${FILE}"
+  echo "Banco principal restaurado a partir de ${FILE}"
+else
+  echo "Modo inválido: ${MODE}"; exit 2
+fi

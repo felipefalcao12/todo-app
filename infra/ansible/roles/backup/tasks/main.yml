@@ -1,0 +1,35 @@
+- name: Diretório local de backups
+  ansible.builtin.file:
+    path: /var/backups/mongo
+    state: directory
+    mode: "0700"
+
+- name: Scripts de backup e restauração
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/usr/local/bin/{{ item }}"
+    mode: "0750"
+  loop:
+    - mongo-backup.sh
+    - mongo-restore.sh
+
+- name: Backup automatizado (cron) com envio ao S3
+  ansible.builtin.cron:
+    name: "backup mongodb todo-app"
+    minute: "{{ backup_cron_minute }}"
+    hour: "{{ backup_cron_hour }}"
+    job: "/usr/local/bin/mongo-backup.sh cron >> /var/log/mongo-backup.log 2>&1"
+    user: root
+
+- name: Rotação do log de backup
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/mongo-backup
+    mode: "0644"
+    content: |
+      /var/log/mongo-backup.log {
+        weekly
+        rotate 4
+        compress
+        missingok
+        notifempty
+      }

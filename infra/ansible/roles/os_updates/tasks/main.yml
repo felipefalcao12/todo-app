@@ -1,0 +1,39 @@
+- name: Verificar atualizações pendentes do sistema operacional
+  ansible.builtin.shell: |
+    set -o pipefail
+    apt list --upgradable 2>/dev/null | grep -c upgradable || true
+  args:
+    executable: /bin/bash
+  register: os_pending
+  changed_when: false
+
+- name: Informar atualizações pendentes
+  ansible.builtin.debug:
+    msg: >-
+      {{ os_pending.stdout | int }} pacote(s) com atualização disponível;
+      update_os={{ update_os | bool }} ({{ 'serão aplicadas' if update_os | bool else 'nada será alterado' }}).
+
+- name: Aplicar atualizações do SO (update_os=true)
+  when: update_os | bool
+  block:
+    - name: Atualizar índice e aplicar upgrade completo
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: dist
+        autoremove: true
+        autoclean: true
+        lock_timeout: 600
+      register: os_upgrade
+
+    - name: Verificar se o kernel/bibliotecas exigem reinício
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_flag
+
+    - name: Reiniciar a VM de forma controlada (contêineres voltam pela política de restart)
+      ansible.builtin.reboot:
+        msg: "Reinício após atualização do SO pelo Ansible"
+        reboot_timeout: 600
+      when:
+        - reboot_if_required | bool
+        - reboot_flag.stat.exists

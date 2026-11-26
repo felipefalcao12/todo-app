@@ -8,3 +8,10 @@ data/
 *.log
 .DS_Store
 Thumbs.db
+
+# Infraestrutura
+infra/ansible/inventory/hosts.yml
+infra/ansible/vars.json
+*.pem
+pm04
+pm04.pub

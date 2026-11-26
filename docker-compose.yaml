@@ -1,39 +1,58 @@
-version: '3.8'
+# Execução local (um único host). Na nuvem, aplicação e banco ficam em VMs
+# distintas e a implantação é feita pelo Ansible (ver ansible/).
+#
+# Copie .env.example para .env e defina as senhas antes de subir.
 
 services:
   frontend:
     build:
-      context: ./frontend  # Diretório do frontend
+      context: ./frontend
     ports:
-      - "80:80"  # Expõe a porta 80 do contêiner para a porta 80 do host
+      - "80:80"            # único ponto de entrada: interface + /todos
     networks:
       - todo-net
     depends_on:
-      - backend  # Garante que o backend esteja rodando antes de subir o frontend
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
 
   backend:
     build:
-      context: ./backend  # Diretório do backend
-    ports:
-      - "5000:5000"  # Expõe a porta 5000 do contêiner para a porta 5000 do host
+      context: ./backend
+    environment:
+      MONGO_URL: mongodb://${MONGO_APP_USER:-todo_app}:${MONGO_APP_PASSWORD:?defina MONGO_APP_PASSWORD no .env}@mongo:27017/todo-app?authSource=todo-app
     networks:
       - todo-net
     depends_on:
-      - mongo  # Garante que o MongoDB esteja rodando antes de iniciar o backend
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+    # sem "ports": a API só é acessada pelo Nginx do frontend
 
   mongo:
     build:
-      context: ./banco-de-dados  # Diretório do backend
+      context: ./banco-de-dados
     container_name: mongo-todo
-    ports:
-      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?defina MONGO_ROOT_PASSWORD no .env}
+      MONGO_INITDB_DATABASE: todo-app
+      MONGO_APP_USER: ${MONGO_APP_USER:-todo_app}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD}
+    volumes:
+      - mongo-data:/data/db  # volume nomeado: dados sobrevivem à recriação
     networks:
       - todo-net
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=root
-      - MONGO_INITDB_ROOT_PASSWORD=rootpassword
-      - MONGO_INITDB_DATABASE=todo-app
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    # sem "ports": o banco não é publicado fora da rede do Docker
 
+volumes:
+  mongo-data:
 
 networks:
   todo-net:

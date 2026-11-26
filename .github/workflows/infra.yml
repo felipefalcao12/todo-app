@@ -1,0 +1,240 @@
+name: "Infra · Provisionar e configurar"
+
+# Pipeline principal do PM04: Terraform (provisionamento) -> Ansible
+# (configuração e manutenção), acionada manualmente com parâmetros.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Ambiente de destino"
+        type: choice
+        options: [dev, homolog, prod]
+        default: dev
+      action:
+        description: "plan = só mostrar alterações | apply = aplicar e configurar"
+        type: choice
+        options: [plan, apply]
+        default: apply
+      instance_name:
+        description: "Nome base das VMs (vm-xxx-app / vm-xxx-db)"
+        type: string
+        default: vm-pm04
+      instance_type:
+        description: "Tipo da VM da aplicação"
+        type: choice
+        options: [t3.micro, t3.small, t3.medium]
+        default: t3.micro
+      docker_image:
+        description: "Prefixo das imagens da aplicação (recebe -backend / -frontend)"
+        type: string
+        default: ghcr.io/felipefalcao12/todo-app
+      docker_tag:
+        description: "Versão da aplicação (tag publicada pela pipeline da aplicação)"
+        type: string
+        default: v1.0.0
+      mongo_tag:
+        description: "Versão da imagem oficial do MongoDB"
+        type: string
+        default: "7.0.14"
+      update_os:
+        description: "Aplicar atualizações do sistema operacional"
+        type: boolean
+        default: false
+      extra_packages:
+        description: "Pacotes adicionais (separados por vírgula)"
+        type: string
+        default: "git,tree"
+      pull_images:
+        description: "Buscar novamente as imagens mesmo com a mesma tag"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read   # token efêmero para baixar as imagens do GHCR nas VMs
+
+concurrency:
+  group: infra-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_instance_name: ${{ inputs.instance_name }}
+  TF_VAR_instance_type: ${{ inputs.instance_type }}
+  TF_VAR_db_instance_type: ${{ vars.DB_INSTANCE_TYPE || 't3.micro' }}
+  TF_VAR_admin_cidrs: ${{ vars.ADMIN_CIDRS || '[]' }}
+
+jobs:
+  terraform:
+    name: "Terraform · ${{ inputs.action }} (${{ inputs.environment }})"
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    outputs:
+      changes: ${{ steps.plan.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Parâmetros desta execução
+        run: |
+          {
+            echo "## Parâmetros"
+            echo "| Parâmetro | Valor |"
+            echo "|---|---|"
+            echo "| environment | \`${{ inputs.environment }}\` |"
+            echo "| action | \`${{ inputs.action }}\` |"
+            echo "| instance_name | \`${{ inputs.instance_name }}\` |"
+            echo "| instance_type | \`${{ inputs.instance_type }}\` |"
+            echo "| docker_image | \`${{ inputs.docker_image }}\` |"
+            echo "| docker_tag | \`${{ inputs.docker_tag }}\` |"
+            echo "| mongo_tag | \`${{ inputs.mongo_tag }}\` |"
+            echo "| update_os | \`${{ inputs.update_os }}\` |"
+            echo "| extra_packages | \`${{ inputs.extra_packages }}\` |"
+            echo "| pull_images | \`${{ inputs.pull_images }}\` |"
+            echo "| região | \`${AWS_REGION}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Credenciais AWS (secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Preparar Terraform
+        uses: ./.github/actions/terraform-setup
+        with:
+          environment: ${{ inputs.environment }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: terraform fmt
+        working-directory: infra/terraform
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform validate
+        working-directory: infra/terraform
+        run: terraform validate
+
+      - name: terraform plan
+        id: plan
+        working-directory: infra/terraform
+        run: |
+          set +e
+          terraform plan -input=false -no-color -detailed-exitcode -out=tfplan | tee plan.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          if [ "$code" -eq 1 ]; then echo "::error::terraform plan falhou"; exit 1; fi
+          if [ "$code" -eq 2 ]; then echo "changes=true" >> "$GITHUB_OUTPUT"; else echo "changes=false" >> "$GITHUB_OUTPUT"; fi
+          {
+            echo "## Terraform plan"
+            if [ "$code" -eq 0 ]; then echo "**Sem alterações de infraestrutura** (estado igual ao código)."; fi
+            echo '```'
+            grep -E '^(Plan:|No changes|  # |Changes to Outputs)' plan.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: terraform apply
+        if: inputs.action == 'apply' && steps.plan.outputs.changes == 'true'
+        working-directory: infra/terraform
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Exportar outputs para o Ansible
+        if: inputs.action == 'apply'
+        working-directory: infra/terraform
+        run: |
+          terraform output -json > ../../tf-outputs.json
+          {
+            echo "## Inventário (ACE-02)"
+            echo '```json'
+            terraform output -json inventory
+            echo '```'
+            echo "URL: $(terraform output -raw app_url)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar outputs (somente IPs e IDs, sem segredos)
+        if: inputs.action == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tf-outputs-${{ inputs.environment }}
+          path: tf-outputs.json
+          retention-days: 7
+
+  ansible:
+    name: "Ansible · configurar e manter (${{ inputs.environment }})"
+    needs: terraform
+    if: inputs.action == 'apply'
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tf-outputs-${{ inputs.environment }}
+
+      - name: Credenciais AWS (secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Chave SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          umask 077; mkdir -p ~/.ssh
+          printf '%s\n' "${SSH_PRIVATE_KEY}" | tr -d '\r' > ~/.ssh/pm04
+
+      - name: Preparar Ansible
+        uses: ./.github/actions/ansible-setup
+        with:
+          outputs-file: tf-outputs.json
+
+      - name: Parâmetros para o Ansible
+        env:
+          DOCKER_IMAGE: ${{ inputs.docker_image }}
+          DOCKER_TAG: ${{ inputs.docker_tag }}
+          MONGO_TAG: ${{ inputs.mongo_tag }}
+          UPDATE_OS: ${{ inputs.update_os }}
+          EXTRA_PACKAGES: ${{ inputs.extra_packages }}
+          PULL_IMAGES: ${{ inputs.pull_images }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          jq -n \
+            --arg environment_name "$ENVIRONMENT" \
+            --arg docker_image "$DOCKER_IMAGE" \
+            --arg docker_tag "$DOCKER_TAG" \
+            --arg mongo_tag "$MONGO_TAG" \
+            --argjson update_os "$UPDATE_OS" \
+            --arg extra_packages "$EXTRA_PACKAGES" \
+            --argjson pull_images "$PULL_IMAGES" \
+            '$ARGS.named' > infra/ansible/vars.json
+          cat infra/ansible/vars.json
+
+      - name: ansible-playbook site.yml
+        working-directory: infra/ansible
+        env:
+          MONGO_ROOT_PASSWORD: ${{ secrets.MONGO_ROOT_PASSWORD }}
+          MONGO_APP_PASSWORD: ${{ secrets.MONGO_APP_PASSWORD }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          ANSIBLE_FORCE_COLOR: "true"
+        run: |
+          set -o pipefail
+          ansible-playbook playbooks/site.yml -e @vars.json | tee ansible.log
+          {
+            echo "## Ansible · PLAY RECAP"
+            echo '```'
+            sed 's/\x1b\[[0-9;]*m//g' ansible.log | sed -n '/PLAY RECAP/,/^$/p'
+            echo '```'
+            echo "Aplicação: $(jq -r .app_url.value ../../tf-outputs.json)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remover acesso SSH temporário do runner
+        if: always() && env.APP_SG_ID != ''
+        run: |
+          aws ec2 revoke-security-group-ingress --group-id "$APP_SG_ID" \
+            --protocol tcp --port 22 --cidr "$RUNNER_CIDR" >/dev/null 2>&1 || true
+          echo "Regra SSH temporária removida (${RUNNER_CIDR})"

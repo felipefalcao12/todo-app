@@ -1,0 +1,3 @@
+mongo_data_mount: /data/mongo
+mongo_base_dir: /opt/mongo
+mongo_container: mongo

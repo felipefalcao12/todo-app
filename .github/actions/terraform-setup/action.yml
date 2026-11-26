@@ -1,0 +1,53 @@
+name: Preparar Terraform
+description: Garante buckets de estado/backup, deriva a chave pública e executa terraform init com estado remoto por ambiente.
+inputs:
+  environment:
+    description: Ambiente (dev/homolog/prod)
+    required: true
+  ssh-private-key:
+    description: Conteúdo do secret SSH_PRIVATE_KEY
+    required: true
+  terraform-version:
+    description: Versão do Terraform
+    default: "~1.13.0"
+runs:
+  using: composite
+  steps:
+    - name: Instalar Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false
+
+    - name: Garantir buckets de estado e de backup (idempotente)
+      shell: bash
+      run: infra/scripts/bootstrap-state.sh
+
+    - name: Derivar chave pública do secret (sem exibir a privada)
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+      run: |
+        set -euo pipefail
+        if [ -z "${SSH_PRIVATE_KEY}" ]; then echo "::error::Secret SSH_PRIVATE_KEY não configurado"; exit 1; fi
+        umask 077
+        mkdir -p ~/.ssh
+        printf '%s\n' "${SSH_PRIVATE_KEY}" | tr -d '\r' > ~/.ssh/pm04
+        PUB="$(ssh-keygen -y -f ~/.ssh/pm04)"
+        echo "TF_VAR_ssh_public_key=${PUB}" >> "$GITHUB_ENV"
+        echo "Chave pública derivada: $(ssh-keygen -lf ~/.ssh/pm04 | awk '{print $2}')"
+
+    - name: terraform init (estado em s3://${{ env.TF_STATE_BUCKET }})
+      shell: bash
+      working-directory: infra/terraform
+      env:
+        TF_IN_AUTOMATION: "true"
+      run: |
+        set -euo pipefail
+        echo "TF_VAR_environment=${{ inputs.environment }}" >> "$GITHUB_ENV"
+        echo "TF_VAR_aws_region=${AWS_REGION}" >> "$GITHUB_ENV"
+        echo "TF_VAR_backup_bucket_name=${BACKUP_BUCKET}" >> "$GITHUB_ENV"
+        terraform init -input=false \
+          -backend-config="bucket=${TF_STATE_BUCKET}" \
+          -backend-config="key=todo-app/${{ inputs.environment }}/terraform.tfstate" \
+          -backend-config="region=${AWS_REGION}"

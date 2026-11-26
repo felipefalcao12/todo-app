@@ -1,0 +1,155 @@
+name: "App · Validar, construir e publicar imagens"
+
+# Entrega da aplicação: valida o código, testa a API com um MongoDB real,
+# constrói as imagens e publica versões identificáveis no GHCR.
+#   - push na main             -> tag sha-<commit>
+#   - execução manual "version" -> tag vX.Y.Z (versão usada na implantação)
+# A implantação é feita pela pipeline "Infra" com o parâmetro docker_tag.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "backend/**"
+      - "banco-de-dados/**"
+      - ".github/workflows/app-ci.yml"
+  pull_request:
+    paths:
+      - "frontend/**"
+      - "backend/**"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versão a publicar (ex.: v1.0.0). Vazio = somente sha-<commit>"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: app-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: "Validar API (com MongoDB)"
+    runs-on: ubuntu-24.04
+    services:
+      mongo:
+        image: mongo:7.0.14
+        ports: ["27017:27017"]
+        env:
+          MONGO_INITDB_ROOT_USERNAME: root
+          MONGO_INITDB_ROOT_PASSWORD: ci-only-password
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok'"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - name: Verificar sintaxe
+        run: node --check index.js
+      - name: Teste integrado do fluxo (criar, listar, concluir, reabrir, excluir)
+        env:
+          MONGO_URL: mongodb://root:ci-only-password@localhost:27017/todo-app?authSource=admin
+          PORT: 5000
+        run: |
+          set -euo pipefail
+          node index.js > api.log 2>&1 &
+          for _ in $(seq 1 30); do curl -fs localhost:5000/health && break; sleep 1; done
+          echo
+          ID=$(curl -fs -X POST localhost:5000/todos -H 'Content-Type: application/json' -d '{"text":"tarefa CI"}' | jq -r ._id)
+          curl -fs localhost:5000/todos | jq -e --arg id "$ID" 'map(select(._id==$id)) | length == 1'
+          curl -fs -X PATCH "localhost:5000/todos/$ID" | jq -e '.completed == true'
+          curl -fs -X PATCH "localhost:5000/todos/$ID" | jq -e '.completed == false'
+          curl -fs -X DELETE "localhost:5000/todos/$ID" | jq -e '.message'
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:5000/todos -H 'Content-Type: application/json' -d '{}')" = 400
+          echo "Fluxo da API validado"
+      - name: Logs da API
+        if: always()
+        run: cat api.log || true
+
+  frontend:
+    name: "Validar frontend"
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test -- --watchAll=false
+        env:
+          CI: "true"
+      - run: npm run build
+
+  images:
+    name: "Construir e publicar imagens"
+    needs: [backend, frontend]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Nome da imagem
+        id: name
+        run: echo "image=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/todo-app-${{ matrix.component }}" >> "$GITHUB_OUTPUT"
+
+      - name: Tags da versão
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          tags: |
+            type=raw,value=${{ inputs.version }},enable=${{ inputs.version != '' }},priority=1000
+            type=sha,prefix=sha-,format=short,priority=900
+          labels: |
+            org.opencontainers.image.title=todo-app-${{ matrix.component }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build e push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.component }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+      - name: Resumo
+        run: |
+          {
+            echo "### ${{ matrix.component }}"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo "Implantar: pipeline **Infra · Provisionar e configurar** com \`docker_tag=${{ steps.meta.outputs.version }}\`."
+          } >> "$GITHUB_STEP_SUMMARY"

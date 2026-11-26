@@ -1,0 +1,130 @@
+- name: Diretórios da aplicação
+  ansible.builtin.file:
+    path: "{{ app_base_dir }}"
+    state: directory
+    mode: "0750"
+
+- name: Configuração do Caddy (HTTPS automático com Let's Encrypt)
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ app_base_dir }}/Caddyfile"
+    mode: "0644"
+  register: caddyfile
+
+- name: Variáveis da API (endereço privado do banco e credencial própria)
+  ansible.builtin.template:
+    src: backend.env.j2
+    dest: "{{ app_base_dir }}/backend.env"
+    mode: "0600"
+  no_log: true
+
+- name: Rede Docker interna da aplicação
+  community.docker.docker_network:
+    name: "{{ app_network }}"
+
+- name: Teste de conectividade privada com o MongoDB ({{ db_private_ip }}:27017)
+  ansible.builtin.wait_for:
+    host: "{{ db_private_ip }}"
+    port: 27017
+    timeout: 60
+
+- name: Versão atualmente implantada
+  ansible.builtin.slurp:
+    src: "{{ app_base_dir }}/deployed_tag"
+  register: deployed_tag_file
+  failed_when: false
+
+- name: Registrar versões anterior e desejada
+  ansible.builtin.set_fact:
+    previous_tag: "{{ (deployed_tag_file.content | b64decode | trim) if deployed_tag_file.content is defined else '' }}"
+
+- name: Plano de implantação
+  ansible.builtin.debug:
+    msg: "Versão atual: {{ previous_tag or 'nenhuma' }} | versão solicitada: {{ docker_tag }} | pull forçado: {{ pull_images | bool }}"
+
+- name: Login no registro de imagens (token efêmero da pipeline)
+  community.docker.docker_login:
+    registry_url: "{{ registry_host }}"
+    username: "{{ registry_user }}"
+    password: "{{ registry_password }}"
+  when: registry_password | length > 0
+  no_log: true
+  changed_when: false
+
+- name: Implantação controlada com retorno automático à versão anterior
+  block:
+    - name: Implantar a versão solicitada
+      ansible.builtin.include_tasks: deploy.yml
+      vars:
+        deploy_tag: "{{ docker_tag }}"
+  rescue:
+    - name: Falha na versão {{ docker_tag }} - retornando para {{ previous_tag }}
+      ansible.builtin.include_tasks: deploy.yml
+      vars:
+        deploy_tag: "{{ previous_tag }}"
+      when: previous_tag | length > 0 and previous_tag != docker_tag
+
+    - name: Interromper a pipeline informando o rollback
+      ansible.builtin.fail:
+        msg: >-
+          A versão {{ docker_tag }} não passou na verificação de saúde.
+          {{ ('Versão ' ~ previous_tag ~ ' restaurada automaticamente.') if previous_tag | length > 0 else 'Não havia versão anterior.' }}
+  always:
+    - name: Logout do registro
+      community.docker.docker_login:
+        registry_url: "{{ registry_host }}"
+        state: absent
+      changed_when: false
+      when: registry_password | length > 0
+
+- name: Registrar versão implantada
+  ansible.builtin.copy:
+    dest: "{{ app_base_dir }}/deployed_tag"
+    content: "{{ docker_tag }}\n"
+    mode: "0644"
+
+- name: Proxy HTTPS (Caddy) na frente do Nginx
+  community.docker.docker_container:
+    name: caddy
+    image: "{{ caddy_image }}"
+    pull: "{{ 'always' if pull_images | bool else 'missing' }}"
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ app_network }}"
+    published_ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - "{{ app_base_dir }}/Caddyfile:/etc/caddy/Caddyfile:ro"
+      - caddy_data:/data
+      - caddy_config:/config
+    state: started
+    restart: "{{ caddyfile.changed }}"
+
+- name: Verificação pública pelo endereço HTTPS (frontend + API + banco)
+  ansible.builtin.uri:
+    url: "https://{{ app_domain }}/health"
+    return_content: true
+    status_code: 200
+  register: public_health
+  until: public_health.status == 200
+  retries: 30
+  delay: 10
+  delegate_to: localhost
+  become: false
+
+- name: Verificar a rota /todos pelo endereço público
+  ansible.builtin.uri:
+    url: "https://{{ app_domain }}/todos"
+    status_code: 200
+  register: public_todos
+  delegate_to: localhost
+  become: false
+
+- name: Ambiente publicado
+  ansible.builtin.debug:
+    msg:
+      - "URL: https://{{ app_domain }}"
+      - "Saúde: {{ public_health.json }}"
+      - "Tarefas cadastradas: {{ public_todos.json | length }}"

@@ -1,0 +1,75 @@
+- name: Criar diretório de chaves do apt
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Baixar a chave GPG oficial do Docker
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Configurar o repositório oficial do Docker
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: deb
+    uris: https://download.docker.com/linux/ubuntu
+    suites: "{{ ansible_distribution_release }}"
+    components: stable
+    architectures: amd64
+    signed_by: /etc/apt/keyrings/docker.asc
+  register: docker_repo
+
+- name: Atualizar índice após adicionar o repositório
+  ansible.builtin.apt:
+    update_cache: true
+    lock_timeout: 600
+  when: docker_repo.changed
+
+- name: Instalar Docker Engine e plugins (se ainda não estiverem disponíveis)
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    lock_timeout: 600
+
+- name: Configurar o daemon (rotação de logs)
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" },
+        "live-restore": true
+      }
+  notify: Reiniciar docker
+
+- name: Garantir Docker habilitado e em execução
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Permitir que o usuário ubuntu use o Docker
+  ansible.builtin.user:
+    name: ubuntu
+    groups: docker
+    append: true
+
+- name: Aplicar alterações pendentes do daemon antes de subir contêineres
+  ansible.builtin.meta: flush_handlers
+
+- name: Conferir versão do Docker
+  ansible.builtin.command: docker version --format '{{ "{{" }} .Server.Version {{ "}}" }}'
+  register: docker_version
+  changed_when: false
+
+- name: Versão do Docker em execução
+  ansible.builtin.debug:
+    msg: "Docker {{ docker_version.stdout }} em {{ inventory_hostname }}"

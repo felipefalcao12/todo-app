@@ -1,0 +1,4 @@
+app_base_dir: /opt/todo
+app_network: todo-net
+backend_image: "{{ docker_image }}-backend"
+frontend_image: "{{ docker_image }}-frontend"
