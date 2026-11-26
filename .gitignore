@@ -15,3 +15,4 @@ infra/ansible/vars.json
 *.pem
 pm04
 pm04.pub
+PM04-entrega.pdf
