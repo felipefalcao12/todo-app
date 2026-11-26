@@ -1,0 +1,222 @@
+# Rotinas operacionais acionadas pela pipeline "Operações".
+#   operation: health | logs | restart | backup | restore-test | restore | reset-demo | isolation-test
+- name: Validar operação
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Conferir operação solicitada
+      ansible.builtin.assert:
+        that: operation in ['health', 'logs', 'restart', 'backup', 'restore-test', 'restore', 'reset-demo', 'isolation-test']
+        fail_msg: "Operação inválida: {{ operation | default('não informada') }}"
+
+# --------------------------------------------------------------------------
+- name: Saúde dos serviços
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Estado dos contêineres
+      ansible.builtin.command: docker ps -a --format 'table {{ "{{" }}.Names{{ "}}" }}\t{{ "{{" }}.Image{{ "}}" }}\t{{ "{{" }}.Status{{ "}}" }}'
+      register: ps
+      changed_when: false
+      when: operation in ['health', 'restart']
+
+    - name: Contêineres em {{ inventory_hostname }}
+      ansible.builtin.debug:
+        msg: "{{ ps.stdout_lines }}"
+      when: operation in ['health', 'restart']
+
+    - name: Uso de disco e memória
+      ansible.builtin.shell: df -h / /data/mongo 2>/dev/null; free -m; uptime
+      register: res
+      changed_when: false
+      when: operation == 'health'
+
+    - name: Recursos em {{ inventory_hostname }}
+      ansible.builtin.debug:
+        msg: "{{ res.stdout_lines }}"
+      when: operation == 'health'
+
+# --------------------------------------------------------------------------
+- name: Reinício controlado dos serviços (banco primeiro, depois API e frontend)
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Reiniciar MongoDB
+      ansible.builtin.command: docker restart mongo
+      when: operation == 'restart' and (service | default('all')) in ['all', 'mongo']
+      changed_when: true
+
+    - name: Aguardar MongoDB saudável
+      ansible.builtin.command: docker inspect -f '{{ "{{" }}.State.Health.Status{{ "}}" }}' mongo
+      register: h
+      until: h.stdout == 'healthy'
+      retries: 30
+      delay: 5
+      changed_when: false
+      when: operation in ['restart', 'health']
+
+    - name: Logs do MongoDB (últimas {{ log_lines | default(100) }} linhas)
+      ansible.builtin.command: docker logs --tail {{ log_lines | default(100) }} mongo
+      register: mlogs
+      changed_when: false
+      when: operation == 'logs'
+
+    - name: Saída dos logs do MongoDB
+      ansible.builtin.debug:
+        msg: "{{ (mlogs.stdout_lines + mlogs.stderr_lines)[-(log_lines | default(100) | int):] }}"
+      when: operation == 'logs'
+
+    - name: Logs do backup automatizado
+      ansible.builtin.command: tail -n 30 /var/log/mongo-backup.log
+      register: blogs
+      changed_when: false
+      failed_when: false
+      when: operation == 'logs'
+
+    - name: Saída dos logs de backup
+      ansible.builtin.debug:
+        msg: "{{ blogs.stdout_lines | default(['sem execuções ainda']) }}"
+      when: operation == 'logs'
+
+    - name: Backup imediato para o S3
+      ansible.builtin.command: /usr/local/bin/mongo-backup.sh {{ backup_label | default('pipeline') }}
+      register: bkp
+      changed_when: true
+      when: operation in ['backup', 'reset-demo']
+
+    - name: Resultado do backup
+      ansible.builtin.debug:
+        msg: "{{ bkp.stdout_lines }}"
+      when: operation in ['backup', 'reset-demo']
+
+    - name: Teste de restauração em ambiente isolado
+      ansible.builtin.command: /usr/local/bin/mongo-restore.sh test {{ backup_file | default('latest') }}
+      register: rtest
+      changed_when: false
+      when: operation == 'restore-test'
+
+    - name: Resultado do teste de restauração
+      ansible.builtin.debug:
+        msg: "{{ rtest.stdout_lines }}"
+      when: operation == 'restore-test'
+
+    - name: Restauração do banco principal
+      ansible.builtin.command: /usr/local/bin/mongo-restore.sh main {{ backup_file | default('latest') }}
+      register: rmain
+      changed_when: true
+      when: operation == 'restore'
+
+    - name: Resultado da restauração
+      ansible.builtin.debug:
+        msg: "{{ rmain.stdout_lines }}"
+      when: operation == 'restore'
+
+    - name: Preparar nova lista para a apresentação (backup feito antes)
+      ansible.builtin.command: >-
+        docker exec mongo sh -c
+        'mongosh --quiet -u "$MONGO_APP_USER" -p "$MONGO_APP_PASSWORD"
+        --authenticationDatabase "$MONGO_INITDB_DATABASE" "$MONGO_INITDB_DATABASE" /scripts/reset-demo.js'
+      register: reset
+      changed_when: true
+      when: operation == 'reset-demo'
+
+    - name: Resultado da preparação da lista
+      ansible.builtin.debug:
+        msg: "{{ reset.stdout }}"
+      when: operation == 'reset-demo'
+
+# --------------------------------------------------------------------------
+- name: Operações na VM da aplicação
+  hosts: app
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Reiniciar API, frontend e proxy HTTPS
+      ansible.builtin.command: docker restart backend frontend caddy
+      when: operation == 'restart' and (service | default('all')) in ['all', 'app']
+      changed_when: true
+
+    - name: Aguardar API e frontend saudáveis
+      ansible.builtin.command: docker inspect -f '{{ "{{" }}.State.Health.Status{{ "}}" }}' {{ item }}
+      register: h
+      until: h.stdout == 'healthy'
+      retries: 30
+      delay: 5
+      changed_when: false
+      loop: [backend, frontend]
+      when: operation in ['restart', 'health']
+
+    - name: Logs dos contêineres da aplicação
+      ansible.builtin.command: docker logs --tail {{ log_lines | default(100) }} {{ item }}
+      register: alogs
+      changed_when: false
+      loop: [backend, frontend, caddy]
+      when: operation == 'logs'
+
+    - name: Saída dos logs da aplicação
+      ansible.builtin.debug:
+        msg: "{{ item.item }}: {{ (item.stdout_lines + item.stderr_lines)[-(log_lines | default(100) | int):] }}"
+      loop: "{{ alogs.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item | default('') }}"
+      when: operation == 'logs'
+
+    - name: Versão implantada
+      ansible.builtin.command: cat /opt/todo/deployed_tag
+      register: tag
+      changed_when: false
+      when: operation == 'health'
+
+    - name: API alcança o MongoDB pela rede privada ({{ db_private_ip }}:27017)
+      ansible.builtin.command: nc -zv -w 5 {{ db_private_ip }} 27017
+      register: priv
+      changed_when: false
+      when: operation in ['health', 'isolation-test']
+
+    - name: Resultado da conexão privada
+      ansible.builtin.debug:
+        msg: "{{ priv.stderr }} | versão implantada: {{ tag.stdout | default('-') }}"
+      when: operation in ['health', 'isolation-test']
+
+# --------------------------------------------------------------------------
+- name: Verificações externas (a partir do runner, fora da AWS)
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Saúde pública pela URL HTTPS
+      ansible.builtin.uri:
+        url: "https://{{ app_domain }}/health"
+        return_content: true
+      register: ph
+      until: ph.status == 200
+      retries: 12
+      delay: 5
+      when: operation in ['health', 'restart', 'restore', 'reset-demo']
+
+    - name: Resultado da saúde pública
+      ansible.builtin.debug:
+        msg: "https://{{ app_domain }}/health -> {{ ph.status }} {{ ph.json }}"
+      when: operation in ['health', 'restart', 'restore', 'reset-demo']
+
+    - name: "ACE-03: tentativa externa na porta 27017 do banco (deve falhar)"
+      ansible.builtin.command: nc -zv -w 5 {{ db_public_ip }} 27017
+      register: ext
+      changed_when: false
+      failed_when: ext.rc == 0
+      when: operation == 'isolation-test'
+
+    - name: "ACE-03: tentativa externa na porta 27017 pelo IP da aplicação (deve falhar)"
+      ansible.builtin.command: nc -zv -w 5 {{ hostvars['app-vm']['ansible_host'] }} 27017
+      register: ext2
+      changed_when: false
+      failed_when: ext2.rc == 0
+      when: operation == 'isolation-test'
+
+    - name: Resultado do teste de isolamento
+      ansible.builtin.debug:
+        msg:
+          - "Banco ({{ db_public_ip }}:27017) a partir da internet: BLOQUEADO ({{ ext.stderr | default('') }})"
+          - "Aplicação ({{ hostvars['app-vm']['ansible_host'] }}:27017) a partir da internet: BLOQUEADO"
+      when: operation == 'isolation-test'

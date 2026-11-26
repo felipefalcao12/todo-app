@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------------
+# Valores padrão. A pipeline sobrescreve com --extra-vars (parâmetros).
+# ---------------------------------------------------------------------------
+environment_name: dev
+timezone: America/Sao_Paulo
+
+# Manutenção do sistema operacional
+update_os: false               # parâmetro update_os
+reboot_if_required: true
+
+# Pacotes
+base_packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - jq
+  - unzip
+  - netcat-openbsd
+  - dnsutils
+  - htop
+  - python3-docker
+  - python3-debian
+extra_packages: []             # parâmetro extra_packages (lista)
+
+# Imagens Docker (tags explícitas e reproduzíveis)
+docker_image: ghcr.io/felipefalcao12/todo-app   # parâmetro docker_image (prefixo)
+docker_tag: v1.0.0                               # parâmetro docker_tag (versão da aplicação)
+mongo_tag: "7.0.14"                              # parâmetro mongo_tag
+caddy_image: caddy:2.8.4-alpine
+awscli_image: public.ecr.aws/aws-cli/aws-cli:2.22.0
+pull_images: false              # true = força a busca de versões novas da mesma tag
+
+# Banco
+mongo_database: todo-app
+mongo_root_user: root
+mongo_app_user: todo_app
+mongo_root_password: "{{ lookup('env', 'MONGO_ROOT_PASSWORD') }}"
+mongo_app_password: "{{ lookup('env', 'MONGO_APP_PASSWORD') }}"
+
+# Registro de imagens (GHCR). Token efêmero do GitHub Actions.
+registry_host: ghcr.io
+registry_user: "{{ lookup('env', 'REGISTRY_USER') }}"
+registry_password: "{{ lookup('env', 'REGISTRY_PASSWORD') }}"
+
+# Backups
+backup_cron_minute: "0"
+backup_cron_hour: "*/6"        # a cada 6 horas
+backup_local_keep: 7

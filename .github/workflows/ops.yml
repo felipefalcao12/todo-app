@@ -1,0 +1,109 @@
+name: "Ops · Rotinas operacionais"
+
+# Rotinas para os alunos antes e durante a feira, sem acesso manual às VMs.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Ambiente"
+        type: choice
+        options: [dev, homolog, prod]
+        default: dev
+      operation:
+        description: "Rotina a executar"
+        type: choice
+        options:
+          - health          # saúde de VMs, contêineres, API->banco e URL pública
+          - logs            # últimos logs de MongoDB, API, Nginx, Caddy e backups
+          - restart         # reinício controlado dos serviços
+          - backup          # backup imediato para o S3
+          - restore-test    # restauração em ambiente isolado (não toca na demo)
+          - restore         # restauração do banco principal (faz backup antes)
+          - reset-demo      # nova lista de demonstração (faz backup antes)
+          - isolation-test  # prova que a porta 27017 não é acessível da internet
+        default: health
+      service:
+        description: "restart: quais serviços"
+        type: choice
+        options: [all, app, mongo]
+        default: all
+      backup_file:
+        description: "restore/restore-test: arquivo do backup (ou latest)"
+        type: string
+        default: latest
+      log_lines:
+        description: "logs: quantidade de linhas"
+        type: string
+        default: "100"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  ops:
+    name: "${{ inputs.operation }} (${{ inputs.environment }})"
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Credenciais AWS (secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Preparar Terraform
+        uses: ./.github/actions/terraform-setup
+        with:
+          environment: ${{ inputs.environment }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Ler outputs do estado
+        working-directory: infra/terraform
+        run: |
+          terraform output -json > ../../tf-outputs.json
+          if [ "$(jq 'has("app_public_ip")' ../../tf-outputs.json)" != "true" ]; then
+            echo "::error::Ambiente ${{ inputs.environment }} não existe. Execute a pipeline Infra primeiro."; exit 1
+          fi
+
+      - name: Preparar Ansible
+        uses: ./.github/actions/ansible-setup
+        with:
+          outputs-file: tf-outputs.json
+
+      - name: Executar rotina ${{ inputs.operation }}
+        working-directory: infra/ansible
+        env:
+          OPERATION: ${{ inputs.operation }}
+          SERVICE: ${{ inputs.service }}
+          BACKUP_FILE: ${{ inputs.backup_file }}
+          LOG_LINES: ${{ inputs.log_lines }}
+          ANSIBLE_FORCE_COLOR: "true"
+        run: |
+          set -o pipefail
+          jq -n --arg operation "$OPERATION" --arg service "$SERVICE" \
+                --arg backup_file "$BACKUP_FILE" --arg log_lines "$LOG_LINES" \
+                --arg backup_label "$OPERATION" '$ARGS.named' > vars.json
+          ansible-playbook playbooks/ops.yml -e @vars.json | tee ops.log
+          {
+            echo "## Rotina \`${OPERATION}\` em \`${{ inputs.environment }}\`"
+            echo '```'
+            sed 's/\x1b\[[0-9;]*m//g' ops.log | grep -E '"msg"|^ok:|^changed:|RESTAURACAO|Backup|BLOQUEADO|->|Tarefas|PLAY RECAP|app-vm|db-vm|localhost' | head -150
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remover acesso SSH temporário do runner
+        if: always() && env.APP_SG_ID != ''
+        run: |
+          aws ec2 revoke-security-group-ingress --group-id "$APP_SG_ID" \
+            --protocol tcp --port 22 --cidr "$RUNNER_CIDR" >/dev/null 2>&1 || true
+          echo "Regra SSH temporária removida (${RUNNER_CIDR})"

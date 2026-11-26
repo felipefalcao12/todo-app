@@ -1,0 +1,9 @@
+# Regras de estilo desativadas conscientemente (nomes em português com
+# variáveis no título das tarefas ajudam a leitura dos logs da pipeline).
+skip_list:
+  - var-naming[no-role-prefix]
+  - name[template]
+  - no-handler
+  - jinja[spacing]
+exclude_paths:
+  - inventory/hosts.example.yml

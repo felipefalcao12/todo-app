@@ -1,0 +1,34 @@
+# Preparação completa e manutenção do ambiente (idempotente).
+- name: Validar parâmetros recebidos da pipeline
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Conferir segredos obrigatórios (sem exibir valores)
+      ansible.builtin.assert:
+        that:
+          - mongo_root_password | length >= 8
+          - mongo_app_password | length >= 8
+        fail_msg: "Defina os secrets MONGO_ROOT_PASSWORD e MONGO_APP_PASSWORD (mínimo 8 caracteres)."
+        quiet: true
+      no_log: true
+
+- name: Base comum das VMs (SO, pacotes e Docker)
+  hosts: all
+  become: true
+  roles:
+    - common
+    - os_updates
+    - docker
+
+- name: VM do banco (MongoDB isolado e backups)
+  hosts: db
+  become: true
+  roles:
+    - mongodb
+    - backup
+
+- name: VM da aplicação (Caddy HTTPS + Nginx/React + API)
+  hosts: app
+  become: true
+  roles:
+    - app

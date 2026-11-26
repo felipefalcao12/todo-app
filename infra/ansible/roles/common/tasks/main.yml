@@ -1,0 +1,32 @@
+- name: Aguardar o cloud-init terminar (evita disputa pelo lock do apt)
+  ansible.builtin.command: cloud-init status --wait
+  changed_when: false
+  failed_when: false
+
+- name: Definir fuso horário
+  community.general.timezone:
+    name: "{{ timezone }}"
+
+- name: Atualizar o índice de pacotes (cache válido por 1h)
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 600
+  changed_when: false  # atualizar o índice não altera o sistema
+
+- name: Normalizar a lista de pacotes extras (aceita lista ou "a,b,c")
+  ansible.builtin.set_fact:
+    extra_packages_list: >-
+      {{ (extra_packages if (extra_packages is iterable and extra_packages is not string)
+          else (extra_packages | default('') | string).split(','))
+         | map('trim') | reject('equalto', '') | list }}
+
+- name: Instalar e manter pacotes base e extras
+  ansible.builtin.apt:
+    name: "{{ base_packages + extra_packages_list }}"
+    state: present
+    lock_timeout: 600
+
+- name: Listar pacotes extras aplicados
+  ansible.builtin.debug:
+    msg: "Pacotes extras: {{ extra_packages_list | join(', ') if extra_packages_list else 'nenhum' }}"

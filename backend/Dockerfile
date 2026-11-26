@@ -1,20 +1,25 @@
-# Etapa 1: Construção da aplicação
 FROM node:18-alpine
 
-# Definindo o diretório de trabalho dentro do container
 WORKDIR /app
 
-# Copiando o package.json e o package-lock.json para instalar as dependências
+# Dependências de produção, instaladas de forma reproduzível pelo lockfile
 COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
-# Instalando as dependências do projeto
-RUN npm install
-
-# Copiando o restante do conteúdo do projeto para o container
 COPY . .
 
-# Expondo a porta que o backend vai usar (5000)
+ARG APP_VERSION=dev
+ENV NODE_ENV=production \
+    PORT=5000 \
+    APP_VERSION=${APP_VERSION}
+
+# Executa sem privilégios de root
+USER node
+
 EXPOSE 5000
 
-# Comando para rodar a aplicação
+# Verificação de saúde que inclui a conexão com o MongoDB
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:5000/health || exit 1
+
 CMD ["node", "index.js"]

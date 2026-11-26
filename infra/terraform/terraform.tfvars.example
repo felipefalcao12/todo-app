@@ -1,0 +1,9 @@
+# Exemplo para execução local (a pipeline passa estes valores por -var).
+environment        = "dev"
+aws_region         = "us-east-1"
+instance_name      = "vm-pm04"
+instance_type      = "t3.micro"
+db_instance_type   = "t3.micro"
+admin_cidrs        = []
+ssh_public_key     = "ssh-ed25519 AAAA... pm04"
+backup_bucket_name = "pm04-backups-<account_id>"

@@ -1,0 +1,117 @@
+name: "Infra · Desativar ambiente"
+
+# Encerramento após a feira: backup final -> terraform destroy -> inventário
+# do que permanece gerando custo.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Ambiente a desativar"
+        type: choice
+        options: [dev, homolog, prod]
+        default: dev
+      confirm:
+        description: 'Digite "destruir-<ambiente>" para confirmar (ex.: destruir-dev)'
+        type: string
+        required: true
+      final_backup:
+        description: "Fazer backup final do banco no S3 antes de destruir"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  destroy:
+    name: "Destroy (${{ inputs.environment }})"
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Conferir confirmação
+        if: inputs.confirm != format('destruir-{0}', inputs.environment)
+        run: |
+          echo "::error::Confirmação incorreta. Digite destruir-${{ inputs.environment }}"
+          exit 1
+
+      - uses: actions/checkout@v5
+
+      - name: Credenciais AWS (secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Preparar Terraform
+        uses: ./.github/actions/terraform-setup
+        with:
+          environment: ${{ inputs.environment }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Ler outputs do estado
+        id: state
+        working-directory: infra/terraform
+        run: |
+          terraform output -json > ../../tf-outputs.json
+          echo "exists=$(jq 'has("app_public_ip")' ../../tf-outputs.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Preparar Ansible (backup final)
+        if: inputs.final_backup && steps.state.outputs.exists == 'true'
+        uses: ./.github/actions/ansible-setup
+        with:
+          outputs-file: tf-outputs.json
+
+      - name: Backup final para o S3
+        if: inputs.final_backup && steps.state.outputs.exists == 'true'
+        working-directory: infra/ansible
+        run: |
+          echo '{"operation":"backup","backup_label":"final"}' > vars.json
+          ansible-playbook playbooks/ops.yml -e @vars.json
+
+      - name: Remover acesso SSH temporário do runner
+        if: always() && env.APP_SG_ID != ''
+        run: |
+          aws ec2 revoke-security-group-ingress --group-id "$APP_SG_ID" \
+            --protocol tcp --port 22 --cidr "$RUNNER_CIDR" >/dev/null 2>&1 || true
+
+      - name: terraform destroy
+        working-directory: infra/terraform
+        run: |
+          terraform plan -destroy -input=false -no-color | grep -E '^(Plan:|  # )' || true
+          terraform destroy -input=false -auto-approve -no-color | tail -n 5
+
+      - name: O que permanece após a desativação
+        run: |
+          {
+            echo "## Ambiente \`${{ inputs.environment }}\` desativado"
+            echo "Removidos: 2 VMs, discos, volume de dados, Elastic IP, VPC, sub-redes, security groups, IAM role e key pair."
+            echo
+            echo "### Permanece (pode gerar custo pequeno)"
+            echo "| Recurso | Destino | Custo |"
+            echo "|---|---|---|"
+            echo "| s3://${BACKUP_BUCKET}/todo-app/${{ inputs.environment }}/ | backups do MongoDB, expiram em 30 dias | centavos (KB) |"
+            echo "| s3://${TF_STATE_BUCKET} | estado do Terraform (vazio após destroy), versionado | centavos |"
+            echo "| Imagens no GHCR | versões da aplicação | gratuito |"
+            echo
+            echo "Backups existentes:"
+            echo '```'
+            aws s3 ls "s3://${BACKUP_BUCKET}/todo-app/${{ inputs.environment }}/" --human-readable || echo "nenhum"
+            echo '```'
+            echo "Para remover tudo definitivamente: \`aws s3 rb s3://${BACKUP_BUCKET} --force\` e \`aws s3 rb s3://${TF_STATE_BUCKET} --force\` (buckets versionados exigem apagar as versões antes)."
+            echo
+            echo "Instâncias EC2 restantes com tag Project=todo-app:"
+            echo '```'
+            aws ec2 describe-instances --filters Name=tag:Project,Values=todo-app Name=tag:Environment,Values=${{ inputs.environment }} Name=instance-state-name,Values=pending,running,stopping,stopped \
+              --query 'Reservations[].Instances[].InstanceId' --output text || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

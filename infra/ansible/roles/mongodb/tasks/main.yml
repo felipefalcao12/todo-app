@@ -1,0 +1,117 @@
+# --- Volume persistente (EBS dedicado) -------------------------------------
+- name: Localizar o disco EBS de dados pelo ID do volume
+  ansible.builtin.set_fact:
+    mongo_device: "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{{ mongo_volume_id | replace('-', '') }}"
+
+- name: Aguardar o volume de dados estar anexado
+  ansible.builtin.wait_for:
+    path: "{{ mongo_device }}"
+    timeout: 300
+
+- name: Criar sistema de arquivos no volume (somente se ainda não existir)
+  community.general.filesystem:
+    dev: "{{ mongo_device }}"
+    fstype: ext4
+    resizefs: true
+
+- name: Montar o volume em {{ mongo_data_mount }} (persistente no fstab)
+  ansible.posix.mount:
+    path: "{{ mongo_data_mount }}"
+    src: "{{ mongo_device }}"
+    fstype: ext4
+    opts: defaults,nofail
+    state: mounted
+
+- name: Diretório de dados do MongoDB (uid 999 = usuário mongodb da imagem)
+  ansible.builtin.file:
+    path: "{{ mongo_data_mount }}/db"
+    state: directory
+    owner: "999"
+    group: "999"
+    mode: "0700"
+
+# --- Configuração e segredos ------------------------------------------------
+- name: Diretórios de configuração
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ mongo_base_dir }}"
+    - "{{ mongo_base_dir }}/initdb"
+    - "{{ mongo_base_dir }}/scripts"
+
+- name: Script de inicialização (usuário da aplicação + dados de demonstração)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../../banco-de-dados/init-mongo.js"
+    dest: "{{ mongo_base_dir }}/initdb/init-mongo.js"
+    mode: "0644"
+
+- name: Scripts auxiliares do banco
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ mongo_base_dir }}/scripts/{{ item }}"
+    mode: "0644"
+  loop:
+    - ensure-app-user.js
+    - reset-demo.js
+
+- name: Arquivo de ambiente com as credenciais (somente root)
+  ansible.builtin.template:
+    src: mongo.env.j2
+    dest: "{{ mongo_base_dir }}/mongo.env"
+    mode: "0600"
+  no_log: true
+
+# --- Contêiner --------------------------------------------------------------
+- name: Contêiner MongoDB {{ mongo_tag }} (porta publicada só no IP privado)
+  community.docker.docker_container:
+    name: "{{ mongo_container }}"
+    image: "mongo:{{ mongo_tag }}"
+    pull: "{{ 'always' if pull_images | bool else 'missing' }}"
+    restart_policy: unless-stopped
+    env_file: "{{ mongo_base_dir }}/mongo.env"
+    published_ports:
+      - "{{ ansible_default_ipv4.address }}:27017:27017"
+    volumes:
+      - "{{ mongo_data_mount }}/db:/data/db"
+      - "{{ mongo_base_dir }}/initdb:/docker-entrypoint-initdb.d:ro"
+      - "{{ mongo_base_dir }}/scripts:/scripts:ro"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    state: started
+  register: mongo_container_result
+
+- name: Aguardar o MongoDB ficar saudável
+  ansible.builtin.command: docker inspect -f '{{ "{{" }}.State.Health.Status{{ "}}" }}' {{ mongo_container }}
+  register: mongo_health
+  until: mongo_health.stdout == "healthy"
+  retries: 30
+  delay: 5
+  changed_when: false
+
+- name: Garantir o usuário próprio da aplicação (idempotente)
+  ansible.builtin.command: >-
+    docker exec {{ mongo_container }} sh -c
+    'mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD"
+    --authenticationDatabase admin /scripts/ensure-app-user.js'
+  register: app_user
+  changed_when: "'CHANGED' in app_user.stdout"
+  no_log: true
+
+- name: Resultado da verificação do usuário da aplicação
+  ansible.builtin.debug:
+    msg: "Usuário {{ mongo_app_user }}: {{ 'criado/atualizado' if app_user.changed else 'já existente e válido' }}"
+
+- name: Versão do MongoDB em execução
+  ansible.builtin.command: docker exec {{ mongo_container }} mongod --version
+  register: mongo_version
+  changed_when: false
+
+- name: Mostrar versão
+  ansible.builtin.debug:
+    msg: "{{ mongo_version.stdout_lines[0] }}"

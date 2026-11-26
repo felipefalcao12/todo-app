@@ -1,0 +1,44 @@
+name: Preparar Ansible
+description: Instala o Ansible, libera SSH temporário para o runner e gera o inventário a partir do estado do Terraform.
+inputs:
+  outputs-file:
+    description: JSON com os outputs do Terraform
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Instalar Ansible e coleções
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --quiet "ansible-core>=2.17,<2.18"
+        ansible-galaxy collection install -r infra/ansible/requirements.yml
+        ansible --version | head -1
+
+    - name: Liberar SSH temporário somente para o IP deste runner
+      shell: bash
+      run: |
+        set -euo pipefail
+        RUNNER_IP="$(curl -fsS https://checkip.amazonaws.com | tr -d '\n')"
+        SG_ID="$(jq -r .app_security_group_id.value '${{ inputs.outputs-file }}')"
+        echo "RUNNER_CIDR=${RUNNER_IP}/32" >> "$GITHUB_ENV"
+        echo "APP_SG_ID=${SG_ID}" >> "$GITHUB_ENV"
+        aws ec2 authorize-security-group-ingress --group-id "${SG_ID}" \
+          --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${RUNNER_IP}/32,Description=runner-temporario-${GITHUB_RUN_ID}}]" \
+          >/dev/null 2>&1 || echo "Regra já existente"
+        echo "SSH liberado temporariamente para ${RUNNER_IP}/32 no ${SG_ID}"
+
+    - name: Gerar inventário
+      shell: bash
+      run: |
+        set -euo pipefail
+        infra/scripts/gen-inventory.sh '${{ inputs.outputs-file }}' "$HOME/.ssh/pm04" infra/ansible/inventory/hosts.yml
+        APP_IP="$(jq -r .app_public_ip.value '${{ inputs.outputs-file }}')"
+        echo "Aguardando SSH em ${APP_IP}..."
+        for i in $(seq 1 40); do
+          if ssh -i ~/.ssh/pm04 -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes ubuntu@"${APP_IP}" true 2>/dev/null; then
+            echo "SSH disponível"; exit 0
+          fi
+          sleep 6
+        done
+        echo "::error::SSH indisponível em ${APP_IP}"; exit 1

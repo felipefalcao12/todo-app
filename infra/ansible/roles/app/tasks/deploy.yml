@@ -1,0 +1,48 @@
+- name: "API {{ backend_image }}:{{ deploy_tag }}"
+  community.docker.docker_container:
+    name: backend
+    image: "{{ backend_image }}:{{ deploy_tag }}"
+    pull: "{{ 'always' if pull_images | bool else 'missing' }}"
+    restart_policy: unless-stopped
+    env_file: "{{ app_base_dir }}/backend.env"
+    env:
+      APP_VERSION: "{{ deploy_tag }}"
+    networks:
+      - name: "{{ app_network }}"
+        aliases: [backend]
+    state: started
+
+- name: Aguardar a API saudável (inclui conexão com o MongoDB)
+  ansible.builtin.command: docker inspect -f '{{ "{{" }}.State.Health.Status{{ "}}" }}' backend
+  register: backend_health
+  until: backend_health.stdout == "healthy"
+  retries: 20
+  delay: 5
+  changed_when: false
+
+- name: "Frontend {{ frontend_image }}:{{ deploy_tag }}"
+  community.docker.docker_container:
+    name: frontend
+    image: "{{ frontend_image }}:{{ deploy_tag }}"
+    pull: "{{ 'always' if pull_images | bool else 'missing' }}"
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ app_network }}"
+        aliases: [frontend]
+    state: started
+
+- name: Aguardar o frontend saudável
+  ansible.builtin.command: docker inspect -f '{{ "{{" }}.State.Health.Status{{ "}}" }}' frontend
+  register: frontend_health
+  until: frontend_health.stdout == "healthy"
+  retries: 20
+  delay: 5
+  changed_when: false
+
+- name: Verificar a API através do Nginx (mesmo caminho usado pelo navegador)
+  ansible.builtin.command: docker exec frontend wget -qO- http://127.0.0.1/health
+  register: nginx_api_health
+  changed_when: false
+  retries: 5
+  delay: 3
+  until: nginx_api_health.rc == 0

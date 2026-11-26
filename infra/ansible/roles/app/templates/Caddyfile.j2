@@ -1,0 +1,16 @@
+# Gerenciado pelo Ansible. Certificado HTTPS automático (Let's Encrypt) para
+# o domínio público gratuito sslip.io que aponta para o Elastic IP.
+{{ app_domain }} {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		-Server
+	}
+	reverse_proxy frontend:80
+	log {
+		output stdout
+		format console
+	}
+}
