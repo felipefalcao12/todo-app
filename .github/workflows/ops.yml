@@ -89,12 +89,34 @@ jobs:
             mongo) IDS="$DB_ID" ;;
             *) IDS="$APP_ID $DB_ID" ;;
           esac
-          echo "Reiniciando: $IDS"
+          # Diagnóstico antes do reinício (sem dados sensíveis)
+          for ID in $IDS; do
+            echo "=== $ID ==="
+            aws ec2 describe-instance-credit-specifications --instance-ids "$ID" \
+              --query 'InstanceCreditSpecifications[0].CpuCredits' --output text | sed 's/^/Modo de créditos de CPU: /'
+            aws cloudwatch get-metric-statistics --namespace AWS/EC2 --metric-name CPUCreditBalance \
+              --dimensions Name=InstanceId,Value="$ID" --statistics Minimum \
+              --start-time "$(date -u -d '-30 min' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" --period 300 \
+              --query 'sort_by(Datapoints,&Timestamp)[].Minimum' --output text | sed 's/^/Saldo de créditos (30 min): /' || true
+            aws cloudwatch get-metric-statistics --namespace AWS/EC2 --metric-name CPUUtilization \
+              --dimensions Name=InstanceId,Value="$ID" --statistics Maximum \
+              --start-time "$(date -u -d '-30 min' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" --period 300 \
+              --query 'sort_by(Datapoints,&Timestamp)[].Maximum' --output text | sed 's/^/CPU máxima % (30 min): /' || true
+            aws ec2 get-console-output --instance-id "$ID" --latest --output text --query Output 2>/dev/null \
+              | grep -iE 'oom|out of memory|killed process|error|fail|hung' | tail -n 20 || true
+          done
+          # stop/start (em vez de reboot) move a VM para outro host físico.
+          # O IP privado e o volume de dados são mantidos.
+          echo "Parando e iniciando: $IDS"
           # shellcheck disable=SC2086
-          aws ec2 reboot-instances --instance-ids $IDS
-          sleep 30
+          aws ec2 stop-instances --instance-ids $IDS >/dev/null
+          # shellcheck disable=SC2086
+          aws ec2 wait instance-stopped --instance-ids $IDS
+          # shellcheck disable=SC2086
+          aws ec2 start-instances --instance-ids $IDS >/dev/null
           # shellcheck disable=SC2086
           aws ec2 wait instance-status-ok --instance-ids $IDS
+          sleep 20
           {
             echo "## Rotina \`reboot-vm\` em \`${{ inputs.environment }}\`"
             echo "VM(s) reiniciada(s) e com status OK: \`$IDS\`"
