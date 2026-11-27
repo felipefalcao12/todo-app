@@ -31,7 +31,7 @@ if [ "${MODE}" = "test" ]; then
   # MongoDB principal continua atendendo a demonstração.
   docker run -d --name "${NAME}" --network none --memory 512m \
     --mount type=volume,dst=/data/db \
-    mongo:{{ mongo_tag }} --wiredTigerCacheSizeGB 0.1 >/dev/null
+    mongo:{{ mongo_tag }} --wiredTigerCacheSizeGB 0.25 >/dev/null
   trap 'docker rm -f -v "${NAME}" >/dev/null 2>&1 || true' EXIT
   READY=""
   for _ in $(seq 1 45); do
