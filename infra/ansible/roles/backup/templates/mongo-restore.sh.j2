@@ -25,16 +25,24 @@ echo "Tarefas registradas no backup: ${EXPECTED}"
 
 if [ "${MODE}" = "test" ]; then
   NAME="mongo-restore-test"
-  docker rm -f "${NAME}" >/dev/null 2>&1 || true
-  # Ambiente isolado: sem rede, dados temporários, mesma versão do MongoDB
-  # Memória limitada: a VM do banco é pequena e o MongoDB principal continua rodando
-  docker run -d --name "${NAME}" --network none --memory 384m --tmpfs /data/db:size=128m \
+  docker rm -f -v "${NAME}" >/dev/null 2>&1 || true
+  # Ambiente isolado: sem rede, volume temporário (apagado no fim) e mesma
+  # versão do MongoDB. Memória e cache limitados: a VM do banco é pequena e o
+  # MongoDB principal continua atendendo a demonstração.
+  docker run -d --name "${NAME}" --network none --memory 512m \
+    --mount type=volume,dst=/data/db \
     mongo:{{ mongo_tag }} --wiredTigerCacheSizeGB 0.1 >/dev/null
-  trap 'docker rm -f "${NAME}" >/dev/null 2>&1 || true' EXIT
-  for _ in $(seq 1 30); do
-    docker exec "${NAME}" mongosh --quiet --eval "db.adminCommand('ping').ok" >/dev/null 2>&1 && break
+  trap 'docker rm -f -v "${NAME}" >/dev/null 2>&1 || true' EXIT
+  READY=""
+  for _ in $(seq 1 45); do
+    if docker exec "${NAME}" mongosh --quiet --eval "db.adminCommand('ping').ok" >/dev/null 2>&1; then READY=1; break; fi
     sleep 2
   done
+  if [ -z "${READY}" ]; then
+    echo "Contêiner de teste não ficou pronto. Últimos logs:"
+    docker logs --tail 20 "${NAME}" 2>&1 || true
+    exit 1
+  fi
   docker exec -i "${NAME}" mongorestore --quiet --archive --gzip < "${LOCAL_DIR}/${FILE}"
   RESTORED="$(docker exec "${NAME}" mongosh --quiet --eval "db.getSiblingDB('{{ mongo_database }}').todos.countDocuments()")"
   echo "Tarefas restauradas no ambiente isolado: ${RESTORED}"
