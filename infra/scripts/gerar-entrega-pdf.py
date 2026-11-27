@@ -69,6 +69,7 @@ def inline(text: str) -> str:
     text = html.escape(text, quote=False)
     text = re.sub(r"`([^`]+)`", rf'<font face="{MONO}" size="8.5">\1</font>', text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", text)
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)",
                   lambda m: (f'<link href="{m.group(2)}" color="#1f4e79"><u>{m.group(1)}</u></link>'
                              if m.group(2).startswith("http") else m.group(1)), text)
@@ -98,7 +99,9 @@ def table(rows, col_widths=None):
 
 def markdown(md: str, skip_title=True, base_dir=ROOT / "docs/pm04"):
     """Conversor simples de Markdown (títulos, parágrafos, listas, tabelas, código, citações)."""
-    out, lines, i = [], md.splitlines(), 0
+    out, i = [], 0
+    # Blocos indentados dentro de listas numeradas são tratados como blocos normais
+    lines = [ln.strip() if re.match(r"^\s+(\||```|> )", ln) else ln for ln in md.splitlines()]
     while i < len(lines):
         line = lines[i]
         if line.startswith("```"):
@@ -146,36 +149,38 @@ def markdown(md: str, skip_title=True, base_dir=ROOT / "docs/pm04"):
 
 
 EVIDENCIAS = [
-    ("Preparação", [
-        ("00-secrets", "Secrets cadastrados no GitHub (somente nomes, valores ocultos)"),
-        ("01-app-ci-v1.0.0", "Pipeline da aplicação: testes + imagens v1.0.0 publicadas no GHCR"),
-        ("02-app-ci-v1.1.0", "Pipeline da aplicação: imagens v1.1.0 (usadas no Cenário 2)"),
+    ("Preparação: segredos e pipeline da aplicação", [
+        ("00-secrets", "Segredos cadastrados no GitHub Actions (somente nomes; valores criptografados)"),
+        ("01-app-ci-v1.0.0", "Pipeline da aplicação: testes da API com MongoDB real e do frontend; imagens v1.0.0 publicadas no GHCR"),
+        ("02-app-ci-v1.1.0", "Pipeline da aplicação: imagens v1.1.0 publicadas (usadas no Cenário 2)"),
+        ("03-actions-execucoes", "Histórico de execuções: todas as mudanças operadas pelas pipelines"),
     ]),
-    ("Cenário 1 — Criação inicial", [
-        ("10-c1-parametros", "Parâmetros da execução e plano do Terraform (recursos a criar)"),
-        ("11-c1-terraform-apply", "terraform apply: infraestrutura criada pela pipeline"),
-        ("12-c1-ansible", "Ansible: SO, pacotes, Docker, MongoDB, backups e aplicação; PLAY RECAP"),
-        ("13-c1-inventario", "Inventário gerado (2 VMs) e URL pública — ACE-02"),
-        ("14-c1-console-ec2", "Console AWS com as VMs vm-pm04-app e vm-pm04-db — ACE-02"),
-        ("15-c1-app-celular", "Aplicação pela URL HTTPS em outro dispositivo (CRUD completo) — ACE-04"),
-        ("16-ace03-isolamento", "Teste de isolamento: banco acessível só pela rede privada — ACE-03"),
-        ("17-ace07-backup", "Backup automatizado enviado ao S3 — ACE-07"),
-        ("18-ace07-restore-test", "Restauração conferida em ambiente isolado — ACE-07"),
+    ("Cenário 1 — Criação inicial (Infra #2)", [
+        ("10-c1-parametros", "Parâmetros informados na execução manual da pipeline"),
+        ("11-c1-terraform-plan", "Terraform plan/apply: 24 recursos criados (VPC, sub-redes, security groups, 2 VMs, EBS, Elastic IP, IAM)"),
+        ("12-c1-ansible-docker", "Ansible preparando as VMs do zero: repositório oficial e instalação do Docker nas duas VMs"),
+        ("14-c1-ansible-https", "Ansible: contêineres em execução, proxy HTTPS e verificação pública /health e /todos"),
+        ("13-c1-inventario-recap", "Inventário das 2 VMs (ACE-02), URL pública e PLAY RECAP sem falhas"),
     ]),
-    ("Cenário 2 — Atualização do ambiente", [
-        ("20-c2-terraform-plan", "Terraform: alteração in-place do tipo da VM (t3.micro → t3.small), sem recriação"),
-        ("21-c2-ansible", "Ansible: atualização do SO, novos pacotes e aplicação v1.0.0 → v1.1.0"),
-        ("22-c2-app-v1.1.0", "Aplicação na v1.1.0 com as tarefas preservadas — ACE-05"),
+    ("Cenário 2 — Atualização do ambiente (Infra #4 e #8)", [
+        ("24-c2-atualizacoes-so-pacotes", "Ansible (update_os=true): 17 atualizações do SO aplicadas em cada VM e novos pacotes extras"),
+        ("23-c2-app-v1.0.0-para-v1.1.0", "Ansible: atualização controlada da aplicação v1.0.0 → v1.1.0 com health check"),
+        ("20-c2-terraform-inplace", "Terraform: tipo da VM alterado no lugar (0 to add, 1 to change, 0 to destroy)"),
+        ("22-c2-mongo-7.0.15", "Ansible: MongoDB 7.0.14 → 7.0.15 recriado mantendo o volume de dados"),
+        ("21-c2-recap", "Resultado do Cenário 2: inventário atualizado e PLAY RECAP sem falhas"),
+        ("25-c2-app-v1.1.0-dados-preservados", "Aplicação pública na v1.1.0 com as tarefas preservadas após as atualizações (ACE-04/05)"),
     ]),
-    ("Cenário 3 — Reexecução sem alterações", [
-        ("30-c3-terraform-nochanges", "Terraform: No changes (estado igual ao código)"),
-        ("31-c3-ansible-idempotente", "Ansible idempotente: changed=0 em todas as VMs"),
+    ("Cenário 3 — Reexecução sem alterações (Infra #10)", [
+        ("30-c3-terraform-nochanges", "Terraform: No changes — infraestrutura igual ao código"),
+        ("31-c3-ansible-idempotente", "Ansible idempotente: changed=0 nas duas VMs"),
     ]),
-    ("Operação e encerramento", [
-        ("40-ops-health", "Rotina de saúde (VMs, contêineres, API→banco, URL pública) — ACE-08"),
-        ("41-ops-logs", "Rotina de logs — ACE-08"),
-        ("42-ops-reset-demo", "Preparação intencional da lista para a apresentação — ACE-10"),
-        ("50-destroy", "Desativação: backup final, destroy e recursos que permanecem — ACE-08/09"),
+    ("Operação, segurança e recuperação", [
+        ("15-app-health", "Saúde pública: API conectada ao MongoDB, versão implantada"),
+        ("16-ace03-isolamento", "Isolamento (ACE-03): porta 27017 bloqueada a partir da internet"),
+        ("17-ace07-backup", "Backup do MongoDB enviado ao S3 (ACE-07)"),
+        ("18-ace07-restore-test", "Restauração testada em ambiente isolado: contagem confere (ACE-07)"),
+        ("40-ops-health", "Rotina de saúde: contêineres, API→banco e URL pública (ACE-08)"),
+        ("42-ops-reset-demo", "Preparação intencional da lista para a apresentação, com backup antes (ACE-10)"),
     ]),
 ]
 
@@ -245,10 +250,14 @@ def main():
     arq = (ROOT / "docs/pm04/arquitetura.md").read_text(encoding="utf-8")
     story += markdown(arq)
 
-    story += [PageBreak(), Paragraph("9. Testes obrigatórios e evidências de execução", S["h2"]),
-              Paragraph("Todas as execuções abaixo foram feitas exclusivamente pelas pipelines do GitHub Actions "
-                        f"(aba Actions do repositório), sem acesso manual aos servidores. Roteiro completo em "
-                        f"docs/pm04/roteiro-testes.md.", S["body"]), Spacer(1, 6)]
+    resultados = (ROOT / "docs/pm04/resultados.md").read_text(encoding="utf-8")
+    story += [PageBreak(), Paragraph("9. Resultados dos testes", S["h2"])]
+    story += markdown(resultados)
+
+    story += [PageBreak(), Paragraph("10. Evidências de execução", S["h2"]),
+              Paragraph("Capturas das execuções reais na AWS, feitas exclusivamente pelas pipelines do GitHub "
+                        "Actions (aba Actions do repositório), sem acesso manual aos servidores.", S["body"]),
+              Spacer(1, 6)]
     n, faltando = 0, []
     for secao, itens in EVIDENCIAS:
         story.append(Paragraph(secao, S["h3"]))
@@ -261,7 +270,7 @@ def main():
 
     roteiro = (ROOT / "docs/pm04/roteiro-testes.md").read_text(encoding="utf-8")
     val = roteiro[roteiro.index("## Validação da demanda"):]
-    story += [Paragraph("10. Validação da demanda — critérios de aceite × evidências", S["h2"])]
+    story += [Paragraph("11. Validação da demanda — critérios de aceite × evidências", S["h2"])]
     story += markdown(val.split("\n", 1)[1])
 
     manual = (ROOT / "docs/pm04/manual-operacao.md").read_text(encoding="utf-8")
