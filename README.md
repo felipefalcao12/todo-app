@@ -19,6 +19,7 @@ A aplicação é implantada na AWS em **duas VMs** (aplicação e MongoDB isolad
 | [docs/pm04/arquitetura.md](docs/pm04/arquitetura.md) | Análise da demanda, arquitetura, decisões, parâmetros, custos e limitações |
 | [docs/pm04/manual-operacao.md](docs/pm04/manual-operacao.md) | Secrets, rotinas (saúde, logs, reinício, backup, restauração, limpeza da lista, desativação) e diagnóstico |
 | [docs/pm04/roteiro-testes.md](docs/pm04/roteiro-testes.md) | Cenários 1, 2 e 3 do PM04 e evidências de aceite |
+| [docs/pm04/roteiro-apresentacao.md](docs/pm04/roteiro-apresentacao.md) | Passo a passo da apresentação: subir, alterar e destruir |
 | [docs/pm04/resultados.md](docs/pm04/resultados.md) | Resultados reais na AWS (links das execuções), problemas encontrados e correções |
 | [evidencias/](evidencias/) | Capturas das execuções usadas no PDF de entrega |
 

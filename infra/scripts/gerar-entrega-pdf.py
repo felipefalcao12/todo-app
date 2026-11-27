@@ -227,6 +227,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--integrantes", default="", help='Nomes separados por ";"')
     ap.add_argument("--saida", default=str(ROOT / "PM04-entrega.pdf"))
+    ap.add_argument("--sem-capa", action="store_true", help="Gera o PDF sem a página de capa")
     args = ap.parse_args()
 
     story = [Spacer(1, 3.5 * cm),
@@ -248,6 +249,8 @@ def main():
                            ("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 6),
                            ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
     story += [t, PageBreak()]
+    if args.sem_capa:
+        story = []
 
     arq = (ROOT / "docs/pm04/arquitetura.md").read_text(encoding="utf-8")
     story += markdown(arq)
