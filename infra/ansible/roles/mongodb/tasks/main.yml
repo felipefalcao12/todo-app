@@ -31,7 +31,7 @@
     mode: "0700"
 
 # --- Configuração e segredos ------------------------------------------------
-- name: Diretório de configuração (somente root: guarda o mongo.env)
+- name: "Diretório de configuração (somente root, guarda o mongo.env)"
   ansible.builtin.file:
     path: "{{ mongo_base_dir }}"
     state: directory
