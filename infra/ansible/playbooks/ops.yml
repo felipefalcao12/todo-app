@@ -177,7 +177,7 @@
 
     - name: Resultado da conexão privada
       ansible.builtin.debug:
-        msg: "{{ priv.stderr }} | versão implantada: {{ tag.stdout | default('-') }}"
+        msg: "API -> MongoDB pela rede privada: {{ priv.stderr }} | versão implantada: {{ tag.stdout | default('-') }}"
       when: operation in ['health', 'isolation-test']
 
 # --------------------------------------------------------------------------

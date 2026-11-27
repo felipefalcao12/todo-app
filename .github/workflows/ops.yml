@@ -147,7 +147,7 @@ jobs:
           {
             echo "## Rotina \`${OPERATION}\` em \`${{ inputs.environment }}\`"
             echo '```'
-            sed 's/\x1b\[[0-9;]*m//g' ops.log | grep -E '"msg"|^ok:|^changed:|RESTAURACAO|Backup|BLOQUEADO|->|Tarefas|PLAY RECAP|app-vm|db-vm|localhost' | head -150
+            sed 's/\x1b\[[0-9;]*m//g' ops.log | grep -E '"msg"|msg:|succeeded|^ok:|^changed:|RESTAURACAO|Backup|BLOQUEADO|->|Tarefas|PLAY RECAP|app-vm|db-vm|localhost|Up [0-9]|NAMES|Servidor rodando|Conectado|Waiting for connections|started' | head -200
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
