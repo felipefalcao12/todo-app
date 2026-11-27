@@ -7,6 +7,7 @@ timezone: America/Sao_Paulo
 # Manutenção do sistema operacional
 update_os: false               # parâmetro update_os
 reboot_if_required: true
+swap_size_mb: 1024            # swap de proteção nas VMs pequenas
 
 # Pacotes
 base_packages:

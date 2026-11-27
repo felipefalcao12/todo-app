@@ -27,7 +27,9 @@ if [ "${MODE}" = "test" ]; then
   NAME="mongo-restore-test"
   docker rm -f "${NAME}" >/dev/null 2>&1 || true
   # Ambiente isolado: sem rede, dados temporários, mesma versão do MongoDB
-  docker run -d --name "${NAME}" --network none --tmpfs /data/db mongo:{{ mongo_tag }} >/dev/null
+  # Memória limitada: a VM do banco é pequena e o MongoDB principal continua rodando
+  docker run -d --name "${NAME}" --network none --memory 384m --tmpfs /data/db:size=128m \
+    mongo:{{ mongo_tag }} --wiredTigerCacheSizeGB 0.1 >/dev/null
   trap 'docker rm -f "${NAME}" >/dev/null 2>&1 || true' EXIT
   for _ in $(seq 1 30); do
     docker exec "${NAME}" mongosh --quiet --eval "db.adminCommand('ping').ok" >/dev/null 2>&1 && break
