@@ -31,13 +31,20 @@
     mode: "0700"
 
 # --- Configuração e segredos ------------------------------------------------
-- name: Diretórios de configuração
+- name: Diretório de configuração (somente root: guarda o mongo.env)
+  ansible.builtin.file:
+    path: "{{ mongo_base_dir }}"
+    state: directory
+    mode: "0750"
+
+# Montados no contêiner: o entrypoint do MongoDB roda como usuário mongodb
+# (uid 999) e precisa listar/ler os scripts de inicialização.
+- name: Diretórios de scripts montados no contêiner
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
-    mode: "0750"
+    mode: "0755"
   loop:
-    - "{{ mongo_base_dir }}"
     - "{{ mongo_base_dir }}/initdb"
     - "{{ mongo_base_dir }}/scripts"
 
