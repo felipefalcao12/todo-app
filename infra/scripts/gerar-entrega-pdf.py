@@ -176,10 +176,12 @@ EVIDENCIAS = [
     ]),
     ("Operação, segurança e recuperação", [
         ("15-app-health", "Saúde pública: API conectada ao MongoDB, versão implantada"),
-        ("16-ace03-isolamento", "Isolamento (ACE-03): porta 27017 bloqueada a partir da internet"),
+        ("16-ace03-isolamento", "Isolamento (ACE-03): API→MongoDB pela rede privada e porta 27017 bloqueada a partir da internet"),
         ("17-ace07-backup", "Backup do MongoDB enviado ao S3 (ACE-07)"),
+        ("19-ace07-backup-automatico-cron", "Backup automatizado: cron executou sozinho às 06:00 e enviou ao S3 (ACE-07)"),
         ("18-ace07-restore-test", "Restauração testada em ambiente isolado: contagem confere (ACE-07)"),
         ("40-ops-health", "Rotina de saúde: contêineres, API→banco e URL pública (ACE-08)"),
+        ("41-ops-restart", "Reinício controlado dos serviços: banco primeiro, depois API e frontend; URL pública 200 (ACE-05/08)"),
         ("42-ops-reset-demo", "Preparação intencional da lista para a apresentação, com backup antes (ACE-10)"),
     ]),
 ]
@@ -251,10 +253,10 @@ def main():
     story += markdown(arq)
 
     resultados = (ROOT / "docs/pm04/resultados.md").read_text(encoding="utf-8")
-    story += [PageBreak(), Paragraph("9. Resultados dos testes", S["h2"])]
+    story += [PageBreak(), Paragraph("11. Resultados dos testes", S["h2"])]
     story += markdown(resultados)
 
-    story += [PageBreak(), Paragraph("10. Evidências de execução", S["h2"]),
+    story += [PageBreak(), Paragraph("12. Evidências de execução", S["h2"]),
               Paragraph("Capturas das execuções reais na AWS, feitas exclusivamente pelas pipelines do GitHub "
                         "Actions (aba Actions do repositório), sem acesso manual aos servidores.", S["body"]),
               Spacer(1, 6)]
@@ -270,8 +272,12 @@ def main():
 
     roteiro = (ROOT / "docs/pm04/roteiro-testes.md").read_text(encoding="utf-8")
     val = roteiro[roteiro.index("## Validação da demanda"):]
-    story += [Paragraph("11. Validação da demanda — critérios de aceite × evidências", S["h2"])]
+    story += [Paragraph("13. Validação da demanda — critérios de aceite × evidências", S["h2"])]
     story += markdown(val.split("\n", 1)[1])
+
+    checklist = (ROOT / "docs/pm04/checklist-entrega.md").read_text(encoding="utf-8")
+    story += [PageBreak(), Paragraph("14. Checklist da entrega", S["h2"])]
+    story += markdown(checklist)
 
     manual = (ROOT / "docs/pm04/manual-operacao.md").read_text(encoding="utf-8")
     story += [PageBreak(), Paragraph("Anexo — Manual de operação para os alunos", S["h2"])]
