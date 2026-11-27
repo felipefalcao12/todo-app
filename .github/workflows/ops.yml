@@ -21,9 +21,10 @@ on:
           - restore         # restauração do banco principal (faz backup antes)
           - reset-demo      # nova lista de demonstração (faz backup antes)
           - isolation-test  # prova que a porta 27017 não é acessível da internet
+          - reboot-vm       # reinicia a(s) VM(s) pela API da AWS (VM sem resposta)
         default: health
       service:
-        description: "restart: quais serviços"
+        description: "restart/reboot-vm: quais serviços (app = VM da aplicação, mongo = VM do banco)"
         type: choice
         options: [all, app, mongo]
         default: all
@@ -75,6 +76,32 @@ jobs:
             echo "::error::Ambiente ${{ inputs.environment }} não existe. Execute a pipeline Infra primeiro."; exit 1
           fi
 
+      - name: Reiniciar VM pela API da AWS (recuperação sem SSH)
+        if: inputs.operation == 'reboot-vm'
+        env:
+          SERVICE: ${{ inputs.service }}
+        run: |
+          set -euo pipefail
+          APP_ID="$(jq -r .inventory.value.app.id tf-outputs.json)"
+          DB_ID="$(jq -r .inventory.value.db.id tf-outputs.json)"
+          case "$SERVICE" in
+            app) IDS="$APP_ID" ;;
+            mongo) IDS="$DB_ID" ;;
+            *) IDS="$APP_ID $DB_ID" ;;
+          esac
+          echo "Reiniciando: $IDS"
+          # shellcheck disable=SC2086
+          aws ec2 reboot-instances --instance-ids $IDS
+          sleep 30
+          # shellcheck disable=SC2086
+          aws ec2 wait instance-status-ok --instance-ids $IDS
+          {
+            echo "## Rotina \`reboot-vm\` em \`${{ inputs.environment }}\`"
+            echo "VM(s) reiniciada(s) e com status OK: \`$IDS\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # O Ansible a seguir confere a saúde dos serviços após o reinício
+          echo "OPERATION_OVERRIDE=health" >> "$GITHUB_ENV"
+
       - name: Preparar Ansible
         uses: ./.github/actions/ansible-setup
         with:
@@ -83,13 +110,14 @@ jobs:
       - name: Executar rotina ${{ inputs.operation }}
         working-directory: infra/ansible
         env:
-          OPERATION: ${{ inputs.operation }}
+          OPERATION_INPUT: ${{ inputs.operation }}
           SERVICE: ${{ inputs.service }}
           BACKUP_FILE: ${{ inputs.backup_file }}
           LOG_LINES: ${{ inputs.log_lines }}
           ANSIBLE_FORCE_COLOR: "true"
         run: |
           set -o pipefail
+          OPERATION="${OPERATION_OVERRIDE:-$OPERATION_INPUT}"
           jq -n --arg operation "$OPERATION" --arg service "$SERVICE" \
                 --arg backup_file "$BACKUP_FILE" --arg log_lines "$LOG_LINES" \
                 --arg backup_label "$OPERATION" '$ARGS.named' > vars.json
